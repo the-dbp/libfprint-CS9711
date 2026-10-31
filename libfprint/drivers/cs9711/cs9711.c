@@ -559,11 +559,13 @@ dev_open (FpImageDevice *dev)
   FpDeviceCs9711 *self = FPI_DEVICE_CS9711 (dev);
   GError *error = NULL;
 
-  /* Claim usb interface */
-  g_usb_device_claim_interface (fpi_device_get_usb_device (FP_DEVICE (dev)), 1, 0, &error);
+  /* Claim usb interface. The Acl16 (2541:2549) puts the fingerprint
+   * endpoints on interface 1; the other ids use interface 0. */
+  g_usb_device_claim_interface (fpi_device_get_usb_device (FP_DEVICE (dev)),
+                                is_acl16 (FP_DEVICE (dev)) ? 1 : 0, 0, &error);
 
   /* Initialize private structure */
-  memset(self->image_buffer, 0, CS9711_FRAME_SIZE);
+  memset(self->image_buffer, 0, sizeof (self->image_buffer));
 
   /* Notify open complete */
   fpi_image_device_open_complete (dev, error);
@@ -576,7 +578,7 @@ dev_close (FpImageDevice *dev)
 
   /* Release usb interface */
   g_usb_device_release_interface (fpi_device_get_usb_device (FP_DEVICE (dev)),
-                                  1, 0, &error);
+                                  is_acl16 (FP_DEVICE (dev)) ? 1 : 0, 0, &error);
 
   /* Notify close complete */
   fpi_image_device_close_complete (dev, error);
