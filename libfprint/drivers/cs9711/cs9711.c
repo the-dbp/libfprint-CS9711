@@ -588,7 +588,6 @@ dev_close (FpImageDevice *dev)
 static const FpIdEntry id_table[] = {
   { .vid = 0x2541,  .pid = 0x0236, },
   { .vid = 0x2541,  .pid = 0x9711, },
-  { .vid = 0x2541,  .pid = 0x2549, .driver_data = CS9711_ACL16_DRIVER_DATA },
   { .vid = 0, .pid = 0, .driver_data = 0 },
 };
 
@@ -611,8 +610,6 @@ fpi_device_cs9711_class_init (FpDeviceCs9711Class *klass)
   dev_class->id_table = id_table;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->nr_enroll_stages = 15;
-  /* Press sensor. The default 3-minute estimate aborts a 15-stage enroll. */
-  dev_class->temp_hot_seconds = -1;
 
   img_class->algorithm = FPI_PRINT_SIGFM;
   img_class->img_open = dev_open;
@@ -627,4 +624,39 @@ fpi_device_cs9711_class_init (FpDeviceCs9711Class *klass)
 
   img_class->img_width = CS9711_WIDTH;
   img_class->img_height = CS9711_HEIGHT;
+}
+
+/* Temperature settings are copied from the class during construction. Keep
+ * Acl16's exception in its own class so the original readers retain their
+ * default temperature model. The driver id stays the same for stored prints.
+ */
+typedef struct
+{
+  FpDeviceCs9711 parent;
+} FpDeviceCs9711Acl16;
+
+typedef FpDeviceCs9711Class FpDeviceCs9711Acl16Class;
+
+GType fpi_device_cs9711_acl16_get_type (void);
+G_DEFINE_TYPE (FpDeviceCs9711Acl16, fpi_device_cs9711_acl16, fpi_device_cs9711_get_type ())
+
+static const FpIdEntry acl16_id_table[] = {
+  { .vid = 0x2541, .pid = 0x2549, .driver_data = CS9711_ACL16_DRIVER_DATA },
+  { .vid = 0, .pid = 0, .driver_data = 0 },
+};
+
+static void
+fpi_device_cs9711_acl16_init (FpDeviceCs9711Acl16 *self)
+{
+}
+
+static void
+fpi_device_cs9711_acl16_class_init (FpDeviceCs9711Acl16Class *klass)
+{
+  FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
+
+  dev_class->id_table = acl16_id_table;
+  /* The default 3-minute estimate aborts a 15-stage Acl16 enroll. */
+  dev_class->temp_hot_seconds = -1;
+  fpi_device_class_auto_initialize_features (dev_class);
 }
