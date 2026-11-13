@@ -88,7 +88,7 @@ usb_send_out_sync (FpDevice *dev, guint8 type, GError **error)
   fpi_usb_transfer_submit_sync (transfer, CS9711_DEFAULT_WAIT_TIMEOUT, &err);
   if (err)
     {
-      g_warning ("Error while sending command 0x%X, continuing anyway: %s", type, err->message);
+      fp_dbg ("Command 0x%X failed: %s", type, err->message);
       g_propagate_error (error, err);
     }
   else
@@ -119,7 +119,8 @@ usb_read_in (FpDevice *dev,
   transfer->short_is_error = short_is_error;
   transfer->ssm = ssm;
   fpi_usb_transfer_fill_bulk (transfer, CS9711_RECEIVE_ENDPOINT, length);
-  fpi_usb_transfer_submit (transfer, timeout_in_ms, NULL, callback, user_data);
+  fpi_usb_transfer_submit (transfer, timeout_in_ms,
+                           FPI_DEVICE_CS9711 (dev)->io_cancellable, callback, user_data);
 }
 
 /* Same as usb_read_in, but honour the requested length. usb_read_in always
@@ -138,7 +139,8 @@ usb_read_exact (FpDevice *dev,
   transfer->short_is_error = FALSE;
   transfer->ssm = ssm;
   fpi_usb_transfer_fill_bulk (transfer, CS9711_RECEIVE_ENDPOINT, length);
-  fpi_usb_transfer_submit (transfer, timeout_in_ms, NULL, callback, user_data);
+  fpi_usb_transfer_submit (transfer, timeout_in_ms,
+                           FPI_DEVICE_CS9711 (dev)->io_cancellable, callback, user_data);
 }
 
 static gboolean
@@ -185,7 +187,9 @@ m_acl16_drain_cb (FpiUsbTransfer *transfer,
 /************************** INIT SSM *************************************/
 
 enum {
-  M_INIT_STATE_DRAIN = 0,
+  M_INIT_STATE_RESET = 0,
+  M_INIT_STATE_RESET_SETTLE,
+  M_INIT_STATE_DRAIN,
   M_INIT_STATE_SEND_INI_QUERY,
   M_INIT_STATE_RECOVER_READ_IGNORED,
   M_INIT_STATE_RECOVER_SEND_RESET,
@@ -208,7 +212,7 @@ m_init_read_cb_check_expected (FpiUsbTransfer *transfer,
 
   if (error)
     {
-      fp_err ("Read failed: %s, aborting", error->message);
+      fp_dbg ("Read failed: %s, aborting", error->message);
       fpi_ssm_mark_failed(transfer->ssm, error);
     }
   else
@@ -258,6 +262,22 @@ m_init_state (FpiSsm *ssm, FpDevice *_dev)
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
+    case M_INIT_STATE_RESET:
+      /* Cancelling a host transfer does not cancel the reader's command.
+       * Reset interrupted Acl16 sessions before draining their replies. */
+      if (is_acl16 (_dev) && self->needs_reset)
+        {
+          usb_send_out_sync (_dev, CS9711_FP_CMD_TYPE_RESET, &error);
+          m_util_fail_if_error_or_next (ssm, error);
+        }
+      else
+        fpi_ssm_jump_to_state (ssm, M_INIT_STATE_DRAIN);
+      break;
+
+    case M_INIT_STATE_RESET_SETTLE:
+      fpi_ssm_next_state_delayed (ssm, CS9711_DEFAULT_RESET_SLEEP);
+      break;
+
     case M_INIT_STATE_DRAIN:
       if (!is_acl16 (_dev))
         {
@@ -320,6 +340,10 @@ m_init_state (FpiSsm *ssm, FpDevice *_dev)
 static void
 m_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error) //TODO: done
 {
+  FPI_DEVICE_CS9711 (dev)->init_ssm = NULL;
+  FPI_DEVICE_CS9711 (dev)->needs_reset = error != NULL;
+  if (error)
+    g_clear_object (&FPI_DEVICE_CS9711 (dev)->io_cancellable);
   fpi_image_device_activate_complete (FP_IMAGE_DEVICE (dev), error);
 }
 
@@ -354,7 +378,7 @@ m_scan_read_cb_acl16 (FpiUsbTransfer *transfer,
 
   if (error)
     {
-      fp_err ("Read failed: %s, aborting", error->message);
+      fp_dbg ("Read failed: %s, aborting", error->message);
       fpi_ssm_mark_failed (transfer->ssm, error);
       return;
     }
@@ -415,7 +439,7 @@ m_scan_read_cb_bulk (FpiUsbTransfer *transfer,
 
   if (error)
     {
-      fp_err ("Read failed: %s, aborting", error->message);
+      fp_dbg ("Read failed: %s, aborting", error->message);
       fpi_ssm_mark_failed (transfer->ssm, error);
     }
   else
@@ -482,13 +506,20 @@ m_scan_state (FpiSsm *ssm, FpDevice *_dev)
       break;
 
     case M_SCAN_INIT_READ:
+      /* Do not leave an asynchronous read referencing a failed/freed SSM if
+       * sending the scan command fails. USB buffers the response until read. */
+      usb_send_out_sync (_dev, CS9711_FP_CMD_TYPE_SCAN, &error);
+      if (error)
+        {
+          fpi_ssm_mark_failed (ssm, error);
+          break;
+        }
+      fpi_image_device_report_finger_status (image_device, TRUE);
+      fpi_ssm_next_state (ssm);
       if (is_acl16 (_dev))
         usb_read_exact (_dev, ssm, CS9711_ACL16_FRAME, CS9711_ACL16_SCAN_TIMEOUT, m_scan_read_cb_acl16, NULL);
       else
         usb_read_in (_dev, ssm, CS9711_FP_RECV_LEN_1, FALSE, 0, m_scan_read_cb_bulk, M_SCAN_READ_CB_BULK_UD_FIRST_BLOCK);
-      usb_send_out_sync (_dev, CS9711_FP_CMD_TYPE_SCAN, &error);
-      fpi_image_device_report_finger_status (image_device, TRUE);
-      m_util_fail_if_error_or_next (ssm, error);
       break;
 
     case M_SCAN_WAIT_FOR_READ_TO_COMPLETE:
@@ -511,7 +542,6 @@ m_scan_state (FpiSsm *ssm, FpDevice *_dev)
 
     case M_SCAN_IMAGE_COMPLETE:
       m_scan_submit_image (ssm, image_device);
-      fpi_image_device_report_finger_status (image_device, FALSE);
       fpi_ssm_mark_completed (ssm);
       break;
 
@@ -522,21 +552,96 @@ m_scan_state (FpiSsm *ssm, FpDevice *_dev)
 
 /************************** ImageDevice impl. *************************************/
 
+static void
+m_scan_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
+{
+  FpDeviceCs9711 *self = FPI_DEVICE_CS9711 (dev);
+
+  self->scan_ssm = NULL;
+  if (self->deactivating)
+    {
+      /* The cancelled transfer has finished; it is now safe to close or
+       * start another operation without callbacks from the previous scan. */
+      self->deactivating = FALSE;
+      g_clear_error (&error);
+      g_clear_object (&self->io_cancellable);
+      fpi_image_device_deactivate_complete (FP_IMAGE_DEVICE (dev), NULL);
+    }
+  else if (error)
+    {
+      self->needs_reset = TRUE;
+      fpi_image_device_session_error (FP_IMAGE_DEVICE (dev), error);
+    }
+  else
+    /* Finger-off can synchronously start the next enrollment scan. Retire
+     * this SSM first so its completion cannot clear the new scan pointer. */
+    fpi_image_device_report_finger_status (FP_IMAGE_DEVICE (dev), FALSE);
+}
+
 /* Activate device */
 static void
 dev_activate (FpImageDevice *dev)
 {
+  FpDeviceCs9711 *self = FPI_DEVICE_CS9711 (dev);
   FpiSsm *ssm;
+
+  g_assert (self->scan_ssm == NULL);
+  g_clear_object (&self->io_cancellable);
+  self->io_cancellable = g_cancellable_new ();
+  g_signal_connect_object (fpi_device_get_cancellable (FP_DEVICE (dev)), "cancelled",
+                           G_CALLBACK (g_cancellable_cancel), self->io_cancellable,
+                           G_CONNECT_SWAPPED);
+  if (g_cancellable_is_cancelled (fpi_device_get_cancellable (FP_DEVICE (dev))))
+    g_cancellable_cancel (self->io_cancellable);
+  self->deactivating = FALSE;
 
   /* Start init ssm */
   ssm = fpi_ssm_new (FP_DEVICE (dev), m_init_state, M_INIT_STATE_COUNT);
+  self->init_ssm = ssm;
   fpi_ssm_start (ssm, m_init_complete);
+}
+
+static void
+dev_cancel (FpDevice *dev)
+{
+  FpDeviceCs9711 *self = FPI_DEVICE_CS9711 (dev);
+
+  /* Initialization is not active yet, so the parent cancellation handler
+   * cannot deactivate it. Cancel its settling timer explicitly. */
+  if (self->init_ssm &&
+      fpi_ssm_get_cur_state (self->init_ssm) == M_INIT_STATE_RESET_SETTLE)
+    {
+      fpi_ssm_cancel_delayed_state_change (self->init_ssm);
+      fpi_ssm_mark_failed (self->init_ssm,
+                           g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                                "Initialization cancelled"));
+      return;
+    }
+  FP_DEVICE_CLASS (fpi_device_cs9711_parent_class)->cancel (dev);
 }
 
 /* Deactivate device */
 static void
 dev_deactivate (FpImageDevice *dev)
 {
+  FpDeviceCs9711 *self = FPI_DEVICE_CS9711 (dev);
+
+  self->deactivating = TRUE;
+  g_cancellable_cancel (self->io_cancellable);
+  if (self->scan_ssm)
+    {
+      self->needs_reset = TRUE;
+      /* There is no USB callback to finish a scan in its initial delay. */
+      if (fpi_ssm_get_cur_state (self->scan_ssm) == M_SCAN_INIT_SLEEP)
+        {
+          fpi_ssm_cancel_delayed_state_change (self->scan_ssm);
+          fpi_ssm_mark_completed (self->scan_ssm);
+        }
+      return;
+    }
+
+  self->deactivating = FALSE;
+  g_clear_object (&self->io_cancellable);
   fpi_image_device_deactivate_complete (dev, NULL);
 }
 
@@ -550,7 +655,8 @@ dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
 
   /* Start a capture operation. */
   ssm_loop = fpi_ssm_new (FP_DEVICE (dev), m_scan_state, M_SCAN_STATE_COUNT);
-  fpi_ssm_start (ssm_loop, NULL);
+  FPI_DEVICE_CS9711 (dev)->scan_ssm = ssm_loop;
+  fpi_ssm_start (ssm_loop, m_scan_complete);
 }
 
 static void
@@ -594,6 +700,15 @@ static const FpIdEntry id_table[] = {
 static void
 fpi_device_cs9711_init (FpDeviceCs9711 *self)
 {
+  /* Also recover firmware left waiting by an earlier process. */
+  self->needs_reset = TRUE;
+}
+
+static void
+fpi_device_cs9711_finalize (GObject *object)
+{
+  g_clear_object (&FPI_DEVICE_CS9711 (object)->io_cancellable);
+  G_OBJECT_CLASS (fpi_device_cs9711_parent_class)->finalize (object);
 }
 
 static void
@@ -601,6 +716,8 @@ fpi_device_cs9711_class_init (FpDeviceCs9711Class *klass)
 {
   FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
   FpImageDeviceClass *img_class = FP_IMAGE_DEVICE_CLASS (klass);
+
+  G_OBJECT_CLASS (klass)->finalize = fpi_device_cs9711_finalize;
 
   g_assert ((CS9711_FRAME_SIZE) == (CS9711_FP_RECV_LEN_1 + CS9711_FP_RECV_LEN_2));
 
@@ -610,6 +727,7 @@ fpi_device_cs9711_class_init (FpDeviceCs9711Class *klass)
   dev_class->id_table = id_table;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
   dev_class->nr_enroll_stages = 15;
+  dev_class->cancel = dev_cancel;
 
   img_class->algorithm = FPI_PRINT_SIGFM;
   img_class->img_open = dev_open;

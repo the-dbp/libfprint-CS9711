@@ -253,6 +253,21 @@ test_utils = static_library('fprint-test-utils',
     install: false)
 
 if 'cs9711' in supported_drivers
+    cs9711_recovery_test = executable('test-cs9711-recovery',
+        'test-cs9711-recovery.c',
+        fp_enums,
+        '../libfprint/fp-context.c',
+        '../libfprint/fp-device.c',
+        '../libfprint/fp-image.c',
+        '../libfprint/fp-print.c',
+        '../libfprint/fp-image-device.c',
+        dependencies: [deps, enums_dep],
+        include_directories: [root_inc, include_directories('../libfprint')],
+        link_with: [libfprint_drivers, libfprint_private],
+        link_args: ['-Wl,--wrap=fpi_usb_transfer_submit', '-Wl,--wrap=fpi_usb_transfer_submit_sync'],
+        c_args: common_cflags,
+    )
+    test('cs9711-recovery', cs9711_recovery_test, suite: ['unit-tests'], env: envs)
     cs9711_variants_test = executable('test-cs9711-variants',
         'test-cs9711-variants.c',
         dependencies: libfprint_private_dep,

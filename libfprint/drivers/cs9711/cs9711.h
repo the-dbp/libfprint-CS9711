@@ -46,6 +46,12 @@ struct _FpDeviceCs9711
   guint8 acl16_drain_budget;
   guint8 acl16_init_retries;
   int acl16_after_drain;
+
+  GCancellable *io_cancellable;
+  FpiSsm *scan_ssm;
+  FpiSsm *init_ssm;
+  gboolean deactivating;
+  gboolean needs_reset;
 };
 
 G_DECLARE_FINAL_TYPE (FpDeviceCs9711, fpi_device_cs9711, FPI, DEVICE_CS9711, FpImageDevice)
