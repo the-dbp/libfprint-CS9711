@@ -30,8 +30,12 @@ finish_read (GError *error, gboolean image)
     {
       if (image)
         {
-          for (gsize i = 0; i < read->transfer->length; i++)
-            read->transfer->buffer[i] = g_test_rand_int_range (0, 256);
+          /* A deterministic corner-rich image works across OpenCV versions;
+           * random noise may contain too few SIFT keypoints. */
+          memset (read->transfer->buffer, 0, read->transfer->length);
+          for (guint y = 0; y < 73; y++)
+            for (guint x = 0; x < 112; x++)
+              read->transfer->buffer[y * 112 + x] = ((x / 8 + y / 8) % 2) ? 225 : 30;
           read->transfer->actual_length = 8192;
         }
       else
